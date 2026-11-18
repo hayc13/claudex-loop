@@ -17,16 +17,18 @@ import uuid
 
 
 PROVIDERS = ("claude", "codex")
+VERDICTS = ("APPROVED", "REVISE", "BLOCKED")
+SEVERITIES = ("high", "medium", "low")
+FINDING_FIELDS = ("id", "severity", "path", "evidence", "fix")
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
-        "verdict": {"type": "string", "enum": ["APPROVED", "REVISE", "BLOCKED"]},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
         "summary": {"type": "string"},
         "findings": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "properties": {key: {"type": "string"} for key in
-                           ("id", "severity", "path", "evidence", "fix")},
-            "required": ["id", "severity", "path", "evidence", "fix"],
+            "properties": {key: {"type": "string"} for key in FINDING_FIELDS},
+            "required": list(FINDING_FIELDS),
         }},
         "coverage": {"type": "array", "items": {"type": "string"}},
         "limitations": {"type": "array", "items": {"type": "string"}},
@@ -41,6 +43,14 @@ class RunError(Exception):
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def load_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def head(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD").decode().strip()
 
 
 def save(path: Path, value) -> None:
@@ -116,7 +126,7 @@ def snapshot(repo: Path, base: str) -> dict:
 def validate_review(value) -> dict:
     if not isinstance(value, dict) or set(value) != set(REVIEW_SCHEMA["required"]):
         raise RunError("Review must contain exactly verdict, summary, findings, coverage and limitations.")
-    if value["verdict"] not in ("APPROVED", "REVISE", "BLOCKED"):
+    if value["verdict"] not in VERDICTS:
         raise RunError("Invalid review verdict.")
     if not isinstance(value["summary"], str) or not value["summary"].strip():
         raise RunError("Missing review summary.")
@@ -129,11 +139,11 @@ def validate_review(value) -> dict:
         raise RunError("Invalid findings list.")
     ids = set()
     for finding in value["findings"]:
-        if not isinstance(finding, dict) or set(finding) != {"id", "severity", "path", "evidence", "fix"}:
+        if not isinstance(finding, dict) or set(finding) != set(FINDING_FIELDS):
             raise RunError("Invalid finding fields.")
         if any(not isinstance(v, str) or not v.strip() for v in finding.values()):
             raise RunError("Every finding needs an id, severity, path, evidence and fix.")
-        if finding["id"] in ids or finding["severity"] not in ("high", "medium", "low"):
+        if finding["id"] in ids or finding["severity"] not in SEVERITIES:
             raise RunError("Finding IDs must be unique; severity must be high, medium or low.")
         ids.add(finding["id"])
     material = any(f["severity"] in ("high", "medium") for f in value["findings"])
@@ -314,7 +324,7 @@ def check_approval(record: dict, plan: Path, repo: Path, plan_body: bytes | None
 
 def previous_record(path: Path, repo: Path, plan: Path, provider: str, mode: str,
                     model, effort) -> dict:
-    record = json.loads(path.read_text(encoding="utf-8"))
+    record = load_json(path)
     for key, expected in {"repo": str(repo), "plan": str(plan), "provider": provider,
                           "mode": mode, "requested_model": model,
                           "requested_effort": effort, "status": "completed"}.items():
@@ -349,7 +359,7 @@ def run(args) -> int:
     if args.mode == "check":
         if not args.approval:
             raise RunError("check requires --approval result.json.")
-        check_approval(json.loads(Path(args.approval).read_text(encoding="utf-8")), plan, repo, plan_body)
+        check_approval(load_json(args.approval), plan, repo, plan_body)
         print("Approval matches the current plan.")
         return 0
     if args.mode == "inspect" and (not args.base or args.resume):
@@ -360,12 +370,12 @@ def run(args) -> int:
     if args.mode == "build":
         if not previous and git(repo, "status", "--porcelain", "--untracked-files=all").strip():
             raise RunError("Build requires a clean checkout. Use an isolated worktree; preserve existing work.")
-        head = git(repo, "rev-parse", "HEAD").decode().strip()
-        args.base = previous["base"] if previous else head
-        if previous and (head != args.base or previous.get("snapshot") != snapshot(repo, args.base)):
+        current = head(repo)
+        args.base = previous["base"] if previous else current
+        if previous and (current != args.base or previous.get("snapshot") != snapshot(repo, args.base)):
             raise RunError("Checkout changed since the previous build. Inspect intervening work before continuing.")
         if args.approval:
-            check_approval(json.loads(Path(args.approval).read_text(encoding="utf-8")), plan, repo, plan_body)
+            check_approval(load_json(args.approval), plan, repo, plan_body)
         elif not args.unreviewed_spec:
             raise RunError("Supply --approval, or explicitly --unreviewed-spec for a standalone work order.")
         if not args.proof:
@@ -439,7 +449,7 @@ def run(args) -> int:
         if before and snapshot(repo, args.base)["sha256"] != before["sha256"]:
             raise RunError("Code changed during inspection; inspect the final code again.")
         if args.mode == "build":
-            if git(repo, "rev-parse", "HEAD").decode().strip() != args.base:
+            if head(repo) != args.base:
                 raise RunError("Builder changed HEAD despite the no-commit contract. Inspect before proceeding.")
             record["snapshot"] = snapshot(repo, args.base)
         record["status"] = "completed"
