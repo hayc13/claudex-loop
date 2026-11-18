@@ -453,5 +453,28 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("outside", error)
 
 
+class HelperTests(unittest.TestCase):
+    def test_schema_constants_drive_schema_and_validation(self):
+        props = runner.REVIEW_SCHEMA["properties"]
+        self.assertEqual(props["verdict"]["enum"], list(runner.VERDICTS))
+        item = props["findings"]["items"]
+        self.assertEqual(item["required"], list(runner.FINDING_FIELDS))
+        self.assertEqual(set(item["properties"]), set(runner.FINDING_FIELDS))
+        self.assertEqual(set(runner.SEVERITIES), {"high", "medium", "low"})
+
+    def test_load_json_and_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.json"
+            path.write_text('{"a": "\u05d0"}', encoding="utf-8")
+            self.assertEqual(runner.load_json(path), {"a": "\u05d0"})
+            self.assertEqual(runner.load_json(str(path)), {"a": "\u05d0"})
+            subprocess.run(["git", "init", "-q", tmp], check=True)
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            expected = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(runner.head(Path(tmp)), expected)
+
+
 if __name__ == "__main__":
     unittest.main()
